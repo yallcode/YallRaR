@@ -556,56 +556,67 @@
   &nbsp;·&nbsp; YallRAR v1.0
 </footer>
 
-<!-- libarchive.js for RAR/7z/tar support -->
-<script type="module">
-  import { Archive } from 'https://cdn.jsdelivr.net/npm/libarchive.js@1.3.0/dist/libarchive.js';
-
-  Archive.init({
-    workerUrl: 'https://cdn.jsdelivr.net/npm/libarchive.js@1.3.0/dist/worker-bundle.js'
-  });
-
+<script>
   // ── State ──
-  let extractedFiles = []; // { name, size, blob }
+  let extractedFiles = [];
+  let archiveLib = null;
+
+  // ── Load libarchive.js dynamically (for RAR/7z/tar) ──
+  function loadLibArchive() {
+    return new Promise((resolve) => {
+      if (archiveLib) return resolve(archiveLib);
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/libarchive.js@1.3.0/dist/libarchive.js';
+      script.onload = () => {
+        try {
+          // libarchive.js exposes Archive globally in non-module builds
+          // Use the UMD bundle
+          resolve(window.Archive || null);
+        } catch(e) { resolve(null); }
+      };
+      script.onerror = () => resolve(null);
+      document.head.appendChild(script);
+    });
+  }
 
   // ── Elements ──
-  const dropZone   = document.getElementById('drop-zone');
-  const fileInput  = document.getElementById('file-input');
-  const browseBtn  = document.getElementById('browse-btn');
-  const progressW  = document.getElementById('progress-wrap');
-  const progFill   = document.getElementById('progress-fill');
-  const progText   = document.getElementById('progress-text');
-  const progPct    = document.getElementById('progress-pct');
-  const results    = document.getElementById('results');
-  const fileList   = document.getElementById('file-list');
-  const metaEl     = document.getElementById('results-meta');
-  const dlAllBtn   = document.getElementById('dl-all-btn');
-  const resetBtn   = document.getElementById('reset-btn');
-  const resetBtnT  = document.getElementById('reset-btn-top');
-  const errorBox   = document.getElementById('error-box');
+  const dropZone  = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const browseBtn = document.getElementById('browse-btn');
+  const progressW = document.getElementById('progress-wrap');
+  const progFill  = document.getElementById('progress-fill');
+  const progText  = document.getElementById('progress-text');
+  const progPct   = document.getElementById('progress-pct');
+  const results   = document.getElementById('results');
+  const fileList  = document.getElementById('file-list');
+  const metaEl    = document.getElementById('results-meta');
+  const dlAllBtn  = document.getElementById('dl-all-btn');
+  const resetBtn  = document.getElementById('reset-btn');
+  const resetBtnT = document.getElementById('reset-btn-top');
+  const errorBox  = document.getElementById('error-box');
 
-  // ── File icons by extension ──
+  // ── File icons ──
   const icons = {
-    pdf: '📄', png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', webp: '🖼️', svg: '🖼️',
-    mp4: '🎬', mkv: '🎬', avi: '🎬', mov: '🎬', webm: '🎬',
-    mp3: '🎵', wav: '🎵', flac: '🎵', ogg: '🎵',
-    zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
-    js: '📜', ts: '📜', html: '📜', css: '📜', py: '📜', cpp: '📜', c: '📜',
-    json: '📋', xml: '📋', csv: '📋', yml: '📋', yaml: '📋',
-    txt: '📃', md: '📃', log: '📃',
-    exe: '⚙️', dll: '⚙️', sh: '⚙️',
-    default: '📄'
+    pdf:'📄',png:'🖼️',jpg:'🖼️',jpeg:'🖼️',gif:'🖼️',webp:'🖼️',svg:'🖼️',
+    mp4:'🎬',mkv:'🎬',avi:'🎬',mov:'🎬',webm:'🎬',
+    mp3:'🎵',wav:'🎵',flac:'🎵',ogg:'🎵',
+    zip:'📦',rar:'📦','7z':'📦',tar:'📦',gz:'📦',
+    js:'📜',ts:'📜',html:'📜',css:'📜',py:'📜',cpp:'📜',c:'📜',
+    json:'📋',xml:'📋',csv:'📋',yml:'📋',yaml:'📋',
+    txt:'📃',md:'📃',log:'📃',
+    exe:'⚙️',dll:'⚙️',sh:'⚙️'
   };
 
   function getIcon(filename) {
-    const ext = filename.split('.').pop().toLowerCase();
-    return icons[ext] || icons.default;
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    return icons[ext] || '📄';
   }
 
   function fmtSize(bytes) {
     if (!bytes) return '—';
     if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
   }
 
   function setProgress(pct, text) {
@@ -615,170 +626,195 @@
   }
 
   function showError(msg) {
-    errorBox.textContent = '⚠ ' + msg;
+    errorBox.textContent  = '⚠ ' + msg;
     errorBox.style.display = 'block';
   }
 
   function reset() {
     extractedFiles = [];
-    results.style.display    = 'none';
-    progressW.style.display  = 'none';
-    resetBtn.style.display   = 'none';
-    errorBox.style.display   = 'none';
-    fileList.innerHTML       = '';
-    fileInput.value          = '';
+    results.style.display   = 'none';
+    progressW.style.display = 'none';
+    resetBtn.style.display  = 'none';
+    errorBox.style.display  = 'none';
+    fileList.innerHTML      = '';
+    fileInput.value         = '';
     setProgress(0, 'Reading archive…');
   }
 
-  // ── Drag & Drop ──
-  dropZone.addEventListener('dragover', e => {
+  // ── Events ──
+  browseBtn.addEventListener('click', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    fileInput.click();
+  });
+
+  dropZone.addEventListener('click', function(e) {
+    if (e.target === browseBtn) return;
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', function() {
+    if (this.files && this.files[0]) processFile(this.files[0]);
+  });
+
+  dropZone.addEventListener('dragover', function(e) {
     e.preventDefault();
     dropZone.classList.add('dragging');
   });
 
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragging'));
+  dropZone.addEventListener('dragleave', function() {
+    dropZone.classList.remove('dragging');
+  });
 
-  dropZone.addEventListener('drop', e => {
+  dropZone.addEventListener('drop', function(e) {
     e.preventDefault();
     dropZone.classList.remove('dragging');
     const file = e.dataTransfer.files[0];
     if (file) processFile(file);
   });
 
-  browseBtn.addEventListener('click', e => { e.stopPropagation(); fileInput.click(); });
-  dropZone.addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', () => { if (fileInput.files[0]) processFile(fileInput.files[0]); });
-
   resetBtn.addEventListener('click', reset);
   resetBtnT.addEventListener('click', reset);
 
-  // ── Download All ──
-  dlAllBtn.addEventListener('click', async () => {
+  dlAllBtn.addEventListener('click', async function() {
     if (!extractedFiles.length) return;
     const zip = new JSZip();
-    for (const f of extractedFiles) {
-      zip.file(f.name, f.blob);
-    }
+    for (const f of extractedFiles) zip.file(f.name, f.blob);
     const blob = await zip.generateAsync({ type: 'blob' });
     triggerDownload(blob, 'extracted_files.zip');
   });
 
   function triggerDownload(blob, filename) {
     const url = URL.createObjectURL(blob);
-    const a   = document.createElement('a');
-    a.href = url; a.download = filename;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
   }
 
-  // ── Render File List ──
   function renderFiles(files) {
     fileList.innerHTML = '';
     let totalSize = 0;
-
-    files.forEach(f => {
+    files.forEach((f, idx) => {
       totalSize += f.size || 0;
       const row = document.createElement('div');
       row.className = 'file-row';
-      row.innerHTML = `
-        <div class="file-name">
-          <span class="file-icon">${getIcon(f.name)}</span>
-          <span title="${f.name}">${f.name}</span>
-        </div>
-        <div class="file-size">${fmtSize(f.size)}</div>
-        <div>
-          <button class="dl-btn" data-idx="${extractedFiles.indexOf(f)}">⬇ Save</button>
-        </div>
-      `;
+      row.innerHTML =
+        '<div class="file-name">' +
+          '<span class="file-icon">' + getIcon(f.name) + '</span>' +
+          '<span title="' + f.name + '">' + f.name + '</span>' +
+        '</div>' +
+        '<div class="file-size">' + fmtSize(f.size) + '</div>' +
+        '<div><button class="dl-btn" data-idx="' + idx + '">⬇ Save</button></div>';
       fileList.appendChild(row);
     });
-
-    metaEl.textContent = `${files.length} file${files.length !== 1 ? 's' : ''} · ${fmtSize(totalSize)} total`;
-
-    fileList.querySelectorAll('.dl-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
+    metaEl.textContent = files.length + ' file' + (files.length !== 1 ? 's' : '') + ' · ' + fmtSize(totalSize) + ' total';
+    fileList.querySelectorAll('.dl-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
         const f = extractedFiles[parseInt(btn.dataset.idx)];
-        if (f) triggerDownload(f.blob, f.name);
+        if (f) triggerDownload(f.blob, f.name.split('/').pop() || f.name);
       });
     });
   }
 
-  // ── Main Extraction ──
   async function processFile(file) {
     reset();
-    errorBox.style.display = 'none';
-
-    const name = file.name.toLowerCase();
     progressW.style.display = 'block';
-    setProgress(5, `Loading ${file.name}…`);
+    setProgress(5, 'Loading ' + file.name + '…');
+
+    const nameLower = file.name.toLowerCase();
 
     try {
-      // ZIP — handled by JSZip
-      if (name.endsWith('.zip')) {
+      if (nameLower.endsWith('.zip')) {
         await extractZip(file);
-      } else {
-        // RAR, 7z, tar, gz, bz2 — handled by libarchive.js
+      } else if (nameLower.endsWith('.rar') || nameLower.endsWith('.7z') ||
+                 nameLower.endsWith('.tar') || nameLower.endsWith('.gz') ||
+                 nameLower.endsWith('.bz2') || nameLower.endsWith('.tgz')) {
         await extractViaLibArchive(file);
+      } else {
+        // Try ZIP first, then libarchive
+        try {
+          await extractZip(file);
+        } catch(e) {
+          extractedFiles = [];
+          await extractViaLibArchive(file);
+        }
+      }
+
+      if (extractedFiles.length === 0) {
+        throw new Error('No files found in archive (it may be empty or password-protected).');
       }
 
       renderFiles(extractedFiles);
-      setProgress(100, 'Done!');
-
-      setTimeout(() => {
+      setProgress(100, 'Done! ' + extractedFiles.length + ' files extracted.');
+      setTimeout(function() {
         progressW.style.display = 'none';
         results.style.display   = 'block';
         resetBtn.style.display  = 'block';
-      }, 600);
+      }, 700);
 
     } catch (err) {
       progressW.style.display = 'none';
-      showError('Could not extract this archive. ' + (err.message || err));
+      showError('Could not extract: ' + (err.message || String(err)));
       console.error(err);
     }
   }
 
-  // ── ZIP extraction ──
   async function extractZip(file) {
     setProgress(20, 'Parsing ZIP…');
-    const zip = await JSZip.loadAsync(file);
-    const keys = Object.keys(zip.files).filter(k => !zip.files[k].dir);
-    let done = 0;
-
-    for (const key of keys) {
-      setProgress(20 + Math.round((done / keys.length) * 75), `Extracting ${key}…`);
+    const zip  = await JSZip.loadAsync(file);
+    const keys = Object.keys(zip.files).filter(function(k) { return !zip.files[k].dir; });
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      setProgress(20 + Math.round((i / keys.length) * 75), 'Extracting ' + key.split('/').pop() + '…');
       const blob = await zip.files[key].async('blob');
-      extractedFiles.push({ name: key, size: blob.size, blob });
-      done++;
+      extractedFiles.push({ name: key, size: blob.size, blob: blob });
     }
   }
 
-  // ── RAR / 7z / tar via libarchive.js ──
   async function extractViaLibArchive(file) {
-    setProgress(20, 'Opening archive…');
-    const archive = await Archive.open(file);
-    setProgress(40, 'Reading entries…');
+    setProgress(15, 'Loading archive engine…');
+
+    // Use the unpkg UMD build which exposes Archive globally
+    await new Promise(function(resolve, reject) {
+      if (window.Archive) return resolve();
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/libarchive.js@1.3.0/dist/libarchive.js';
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+
+    if (!window.Archive) throw new Error('Archive engine failed to load. Try a ZIP file instead.');
+
+    window.Archive.init({
+      workerUrl: 'https://unpkg.com/libarchive.js@1.3.0/dist/worker-bundle.js'
+    });
+
+    setProgress(30, 'Opening archive…');
+    const archive = await window.Archive.open(file);
+    setProgress(50, 'Reading entries…');
 
     const obj = await archive.extractFiles();
-    setProgress(70, 'Extracting files…');
+    setProgress(80, 'Processing files…');
 
-    function flatten(entries, prefix = '') {
-      for (const [key, val] of Object.entries(entries)) {
+    function flatten(entries, prefix) {
+      prefix = prefix || '';
+      for (const key in entries) {
+        const val = entries[key];
         const fullPath = prefix ? prefix + '/' + key : key;
-        if (val instanceof File) {
+        if (val && val instanceof File) {
           extractedFiles.push({ name: fullPath, size: val.size, blob: val });
-        } else if (typeof val === 'object' && val !== null) {
+        } else if (val && typeof val === 'object' && !(val instanceof File)) {
           flatten(val, fullPath);
         }
       }
     }
-
     flatten(obj);
     setProgress(95, 'Finalizing…');
   }
-
 </script>
-
-<!-- JSZip already loaded via script tag above, available globally -->
 </body>
 </html>
